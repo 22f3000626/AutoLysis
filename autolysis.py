@@ -14,6 +14,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import httpx
 import chardet
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import MinMaxScaler
+from multiprocessing import Pool
 
 # Constants
 API_URL = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
@@ -36,69 +39,70 @@ def load_data(file_path):
         sys.exit(1)
 
 def analyze_data(df):
-    """Perform basic data analysis."""
+    """Perform advanced data analysis."""
     try:
         numeric_df = df.select_dtypes(include=['number'])
+        scaled_numeric = MinMaxScaler().fit_transform(numeric_df) if not numeric_df.empty else []
+        if not numeric_df.empty:
+            isolation_forest = IsolationForest(contamination=0.05, random_state=42)
+            anomalies = isolation_forest.fit_predict(scaled_numeric)
+            df['Anomaly_Score'] = anomalies
+
         analysis = {
             'shape': df.shape,
             'columns': df.dtypes.to_dict(),
             'missing_values': df.isnull().sum().to_dict(),
             'unique_values': df.nunique().to_dict(),
             'summary': df.describe(include='all').to_dict(),
-            'correlation': numeric_df.corr().to_dict() if not numeric_df.empty else {}
+            'correlation': numeric_df.corr().to_dict() if not numeric_df.empty else {},
+            'anomaly_summary': df['Anomaly_Score'].value_counts().to_dict() if 'Anomaly_Score' in df else "N/A"
         }
         return analysis
     except Exception as e:
         print(f"Error during data analysis: {e}")
         sys.exit(1)
 
+def plot_violin(column, df, output_dir):
+    """Generate violin plots for numeric columns."""
+    try:
+        plt.figure()
+        sns.violinplot(x=df[column], color='cyan')
+        plt.title(f'Violin Plot of {column}')
+        plt.savefig(f"{output_dir}/{column}_violin.png")
+        plt.close()
+    except Exception as e:
+        print(f"Error plotting violin plot for {column}: {e}")
+
 def visualize_data(df, output_dir="visualizations"):
     """Generate and save visualizations."""
     os.makedirs(output_dir, exist_ok=True)
     sns.set(style="whitegrid")
-    numeric_columns = df.select_dtypes(include=['number']).columns
+
+    # Sample the dataset for faster visualization
+    sample_df = df.sample(n=5000, random_state=42) if len(df) > 5000 else df
+    numeric_columns = sample_df.select_dtypes(include=['number']).columns
 
     try:
         # Visualize missing data pattern
         plt.figure(figsize=(10, 6))
-        sns.heatmap(df.isnull(), cbar=False, cmap="viridis")
+        sns.heatmap(sample_df.isnull(), cbar=False, cmap="viridis")
         plt.title("Missing Data Heatmap")
         plt.savefig(f"{output_dir}/missing_data_heatmap.png")
         plt.close()
 
-        # Visualize numeric data distributions
-        for column in numeric_columns:
-            plt.figure()
-            sns.histplot(df[column].dropna(), kde=True, color='blue')
-            plt.title(f'Distribution of {column}')
-            plt.savefig(f"{output_dir}/{column}_distribution.png")
-            plt.close()
+        # Parallelize numeric column violin plots
+        with Pool(processes=4) as pool:
+            pool.starmap(plot_violin, [(col, sample_df, output_dir) for col in numeric_columns])
 
-        # Pairplot for numeric columns
+        # Correlation heatmap for a subset of numeric columns
         if len(numeric_columns) > 1:
-            pairplot = sns.pairplot(df[numeric_columns].dropna())
-            pairplot.savefig(f"{output_dir}/pairplot.png")
-            plt.close()
-
-        # Correlation heatmap
-        if len(numeric_columns) > 1:
+            sampled_columns = numeric_columns[:10]  # Limit the number of columns
             plt.figure(figsize=(10, 8))
-            corr_matrix = df[numeric_columns].corr()
+            corr_matrix = sample_df[sampled_columns].corr()
             sns.heatmap(corr_matrix, annot=True, fmt='.2f', cmap="coolwarm")
             plt.title("Correlation Heatmap")
             plt.savefig(f"{output_dir}/correlation_heatmap.png")
             plt.close()
-
-        # Boxplots for numeric columns grouped by categorical variables
-        categorical_columns = df.select_dtypes(include=['object', 'category']).columns
-        for cat_col in categorical_columns:
-            for num_col in numeric_columns:
-                plt.figure(figsize=(12, 6))
-                sns.boxplot(data=df, x=cat_col, y=num_col)
-                plt.title(f"Boxplot of {num_col} by {cat_col}")
-                plt.xticks(rotation=45)
-                plt.savefig(f"{output_dir}/boxplot_{num_col}_by_{cat_col}.png")
-                plt.close()
 
         print("Visualizations saved successfully.")
     except Exception as e:
@@ -111,20 +115,21 @@ def generate_narrative(analysis):
         'Content-Type': 'application/json'
     }
     prompt = (
-        f"Write a storytelling narrative based on the following data analysis summary:\n\n"
-        f"Dataset Overview: \n"
+        f"You are a data analyst detective solving mysteries. Here is the data analysis report:\n\n"
+        f"Dataset Summary:\n"
         f"Shape: {analysis['shape']}\n"
         f"Columns: {analysis['columns']}\n\n"
-        f"Missing Data: \n"
+        f"Missing Data:\n"
         f"{analysis['missing_values']}\n\n"
-        f"Unique Values: \n"
+        f"Unique Values:\n"
         f"{analysis['unique_values']}\n\n"
-        f"Summary Statistics: \n"
+        f"Summary Statistics:\n"
         f"{analysis['summary']}\n\n"
-        f"Correlation Insights: \n"
+        f"Correlation Insights:\n"
         f"{analysis['correlation']}\n\n"
-        f"Create a detailed narrative with analysis and insights that flow naturally like a report. "
-        f"Explain trends, anomalies, and any correlations discovered. Use storytelling techniques to make it engaging."
+        f"Anomaly Detection Results:\n"
+        f"{analysis['anomaly_summary']}\n\n"
+        f"Write a detailed and engaging report as if unraveling the story of the data. Highlight trends, correlations, anomalies, and potential insights. Use a storytelling tone."
     )
     data = {
         "model": "gpt-4o-mini",
@@ -143,6 +148,7 @@ def save_narrative(narrative, file_path="README.md"):
     """Save narrative to a file."""
     try:
         with open(file_path, 'w') as f:
+            f.write("# Dataset Detective Report\n\n")
             f.write(narrative)
         print(f"Narrative saved to {file_path}.")
     except Exception as e:
@@ -160,4 +166,3 @@ if __name__ == "__main__":
         print("Usage: python autolysis.py <dataset.csv>")
         sys.exit(1)
     main(sys.argv[1])
-
